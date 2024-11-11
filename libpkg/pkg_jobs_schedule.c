@@ -94,6 +94,9 @@ static bool debug_edges = false;
 static bool
 pkg_jobs_schedule_graph_edge(struct pkg_solved *a, struct pkg_solved *b)
 {
+	assert(a->type != PKG_SOLVED_FETCH);
+	assert(b->type != PKG_SOLVED_FETCH);
+
 	if (a == b) {
 		return (false);
 	}
@@ -110,76 +113,35 @@ pkg_jobs_schedule_graph_edge(struct pkg_solved *a, struct pkg_solved *b)
 		if (edge && debug_edges) {
 			dbg(4, "  edge to %s %s, split upgrade",
 			    pkg_jobs_schedule_job_type_string(b),
-			    b->items[0]->pkg->uid);
+			    b->new->pkg->uid);
 		}
 		return (edge);
 	}
 
-	/* TODO: These switches would be unnecessary if delete jobs used
-	 * items[1] rather than items[0]. I suspect other cleanups could
-	 * be made as well. */
-	struct pkg *a_new = NULL;
-	struct pkg *a_old = NULL;
-	switch (a->type) {
-	case PKG_SOLVED_INSTALL:
-	case PKG_SOLVED_UPGRADE_INSTALL:
-		a_new = a->items[0]->pkg;
-		break;
-	case PKG_SOLVED_DELETE:
-	case PKG_SOLVED_UPGRADE_REMOVE:
-		a_old = a->items[0]->pkg;
-		break;
-	case PKG_SOLVED_UPGRADE:
-		a_new = a->items[0]->pkg;
-		a_old = a->items[1]->pkg;
-		break;
-	default:
-		assert(false);
-	}
-
-	struct pkg *b_new = NULL;
-	struct pkg *b_old = NULL;
-	switch (b->type) {
-	case PKG_SOLVED_INSTALL:
-	case PKG_SOLVED_UPGRADE_INSTALL:
-		b_new = b->items[0]->pkg;
-		break;
-	case PKG_SOLVED_DELETE:
-	case PKG_SOLVED_UPGRADE_REMOVE:
-		b_old = b->items[0]->pkg;
-		break;
-	case PKG_SOLVED_UPGRADE:
-		b_new = b->items[0]->pkg;
-		b_old = b->items[1]->pkg;
-		break;
-	default:
-		assert(false);
-	}
-
-	if (a_new != NULL && b_new != NULL &&
-	    pkg_jobs_schedule_direct_depends(b_new, a_new)) {
+	if (a->new != NULL && b->new != NULL &&
+	    pkg_jobs_schedule_direct_depends(b->new->pkg, a->new->pkg)) {
 		if (debug_edges) {
 			dbg(4, "  edge to %s %s, new depends on new",
 			    pkg_jobs_schedule_job_type_string(b),
-			    b->items[0]->pkg->uid);
+			    b->new->pkg->uid);
 		}
 		return (true);
-	} else if (a_old != NULL && b_old != NULL &&
-		   pkg_jobs_schedule_direct_depends(a_old, b_old)) {
+	} else if (a->old != NULL && b->old != NULL &&
+		   pkg_jobs_schedule_direct_depends(a->old->pkg, b->old->pkg)) {
 		if (debug_edges) {
 			dbg(4, "  edge to %s %s, old depends on old",
 			    pkg_jobs_schedule_job_type_string(b),
-			    b->items[0]->pkg->uid);
+			    b->old->pkg->uid);
 		}
 		return (true);
-	} else if (a_old != NULL && b_new != NULL) {
+	} else if (a->old != NULL && b->new != NULL) {
 		struct pkg_conflict *conflict = NULL;
-		while (pkg_conflicts(a_old, &conflict) == EPKG_OK) {
-			if (STREQ(b_new->uid, conflict->uid)) {
+		while (pkg_conflicts(a->old->pkg, &conflict) == EPKG_OK) {
+			if (STREQ(b->new->pkg->uid, conflict->uid)) {
 				if (debug_edges) {
 					dbg(4, "  edge to %s %s, old conflicts with new",
 					    pkg_jobs_schedule_job_type_string(b),
-					    b->items[0]->pkg->uid);
+					    b->new->pkg->uid);
 				}
 				return (true);
 			}
@@ -197,7 +159,7 @@ pkg_jobs_schedule_dbg_job(pkg_solved_list *jobs, struct pkg_solved *job)
 	}
 
 	dbg(4, "job: %s %s", pkg_jobs_schedule_job_type_string(job),
-	    job->items[0]->pkg->uid);
+	    job->new != NULL ? job->new->pkg->uid : job->old->pkg->uid);
 
 	debug_edges = true;
 	tll_foreach(*jobs, it) {
@@ -244,7 +206,8 @@ pkg_jobs_schedule_cmp_available(struct pkg_solved *a, struct pkg_solved *b)
 	if (ret == 0) {
 		/* Falling back to lexicographical ordering ensures that job execution
 		 * order is always consistent and makes testing easier. */
-		return strcmp(a->items[0]->pkg->uid, b->items[0]->pkg->uid);
+		return strcmp(a->new != NULL ? a->new->pkg->uid : a->old->pkg->uid,
+		              b->new != NULL ? b->new->pkg->uid : b->old->pkg->uid);
 	} else {
 		return ret;
 	}
@@ -400,16 +363,16 @@ int pkg_jobs_schedule(struct pkg_jobs *j)
 		}
 
 		/* path is now the upgrade job chosen to be split */
-		dbg(2, "splitting upgrade %s job", path->items[0]->pkg->uid);
+		dbg(2, "splitting upgrade %s job", path->new->pkg->uid);
 
-		struct pkg_solved *new = xcalloc(1, sizeof(struct pkg_solved));
-		new->type = PKG_SOLVED_UPGRADE_REMOVE;
-		new->items[0] = path->items[1];
-		new->xlink = path;
+		struct pkg_solved *split_delete = xcalloc(1, sizeof(struct pkg_solved));
+		split_delete->type = PKG_SOLVED_UPGRADE_REMOVE;
+		split_delete->old = path->old;
+		split_delete->xlink = path;
 		path->type = PKG_SOLVED_UPGRADE_INSTALL;
-		path->items[1] = NULL;
-		path->xlink = new;
-		tll_push_back(j->jobs, new);
+		path->old = NULL;
+		path->xlink = split_delete;
+		tll_push_back(j->jobs, split_delete);
 	}
 
 	pkg_jobs_schedule_topological_sort(&j->jobs);

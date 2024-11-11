@@ -72,8 +72,27 @@ enum pkg_solved_cycle_mark {
 	PKG_SOLVED_CYCLE_MARK_PATH,	/* In the path currently being checked */
 };
 
+/*
+ * The old and new fields may be NULL depending on the type:
+ *
+ * PKG_SOLVED_INSTALL, PKG_SOLVED_UPGRADE_INSTALL:
+ *   old is NULL.
+ *   new is the package to be installed.
+ *
+ * PKG_SOLVED_DELETE, PKG_SOLVED_UPGRADE_REMOVE:
+ *   old is the package to be deleted.
+ *   new is NULL.
+ *
+ * PKG_SOLVED_UPGRADE:
+ *   old is the currently installed package.
+ *   new is the package to replace the currently installed one.
+ *
+ * PKG_SOLVED_FETCH:
+ *   TODO
+ */
 struct pkg_solved {
-	struct pkg_job_universe_item *items[2]; /* to-add/to-delete */
+	struct pkg_job_universe_item *old;
+	struct pkg_job_universe_item *new;
 	struct pkg_solved *xlink;	/* link split jobs together */
 	pkg_solved_t type;
 	enum pkg_solved_cycle_mark mark;/* scheduling cycle detection */

@@ -337,18 +337,17 @@ cudf_strdup(const char *in)
 
 static void
 pkg_jobs_cudf_insert_res_job (pkg_solved_list *target,
-		struct pkg_job_universe_item *it_new,
 		struct pkg_job_universe_item *it_old,
+		struct pkg_job_universe_item *it_new,
 		int type)
 {
 	struct pkg_solved *res;
 
 	res = xcalloc(1, sizeof(struct pkg_solved));
 
-	res->items[0] = it_new;
+	res->old = it_old;
+	res->new = it_new;
 	res->type = type;
-	if (it_old != NULL)
-		res->items[1] = it_old;
 
 	tll_push_back(*target, res);
 }
@@ -407,7 +406,7 @@ pkg_jobs_cudf_add_package(struct pkg_jobs *j, struct pkg_cudf_entry *entry)
 		if (entry->installed && selected->pkg->type != PKG_INSTALLED) {
 			pkg_debug(3, "pkg_cudf: schedule installation of %s(%d)",
 					entry->uid, ver);
-			pkg_jobs_cudf_insert_res_job (&j->jobs, selected, NULL, PKG_SOLVED_INSTALL);
+			pkg_jobs_cudf_insert_res_job (&j->jobs, NULL, selected, PKG_SOLVED_INSTALL);
 		}
 		else if (!entry->installed && selected->pkg->type == PKG_INSTALLED) {
 			pkg_debug(3, "pkg_cudf: schedule removing of %s(%d)",
@@ -428,7 +427,7 @@ pkg_jobs_cudf_add_package(struct pkg_jobs *j, struct pkg_cudf_entry *entry)
 		assert(old != NULL);
 		/* XXX: this is a hack due to iterators stupidity */
 		selected->pkg->old_version = old->pkg->version;
-		pkg_jobs_cudf_insert_res_job (&j->jobs, selected, old, PKG_SOLVED_UPGRADE);
+		pkg_jobs_cudf_insert_res_job (&j->jobs, old, selected, PKG_SOLVED_UPGRADE);
 	}
 
 	return (EPKG_OK);

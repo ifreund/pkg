@@ -1263,7 +1263,7 @@ pkg_solve_insert_res_job (struct pkg_solve_variable *var,
 			res = xcalloc(1, sizeof(struct pkg_solved));
 			/* Pure install */
 			if (seen_del == 0) {
-				res->items[0] = add_var->unit;
+				res->new = add_var->unit;
 				res->type = (j->type == PKG_JOBS_FETCH) ?
 								PKG_SOLVED_FETCH : PKG_SOLVED_INSTALL;
 				tll_push_back(j->jobs, res);
@@ -1272,8 +1272,8 @@ pkg_solve_insert_res_job (struct pkg_solve_variable *var,
 			}
 			else {
 				/* Upgrade */
-				res->items[0] = add_var->unit;
-				res->items[1] = del_var->unit;
+				res->new = add_var->unit;
+				res->old = del_var->unit;
 				res->type = PKG_SOLVED_UPGRADE;
 				tll_push_back(j->jobs, res);
 				dbg(3, "pkg_solve: schedule upgrade of %s from %s to %s",
@@ -1293,7 +1293,7 @@ pkg_solve_insert_res_job (struct pkg_solve_variable *var,
 					continue;
 
 				res = xcalloc(1, sizeof(struct pkg_solved));
-				res->items[0] = cur_var->unit;
+				res->old = cur_var->unit;
 				res->type = PKG_SOLVED_DELETE;
 				tll_push_back(j->jobs, res);
 				dbg(3, "schedule deletion of %s %s",

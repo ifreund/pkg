@@ -306,8 +306,8 @@ pkg_jobs_iter(struct pkg_jobs *j, void **iter,
 	if (t->it == NULL)
 		t->it = j->jobs.head;
 	s = t->it->item;
-	*new = s->items[0]->pkg;
-	*old = s->items[1] ? s->items[1]->pkg : NULL;
+	*new = s->new != NULL ? s->new->pkg : NULL;
+	*old = s->old != NULL ? s->old->pkg : NULL;
 	*type = s->type;
 	t->it = t->it->next;
 	return (true);
