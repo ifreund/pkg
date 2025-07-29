@@ -83,6 +83,14 @@
 		(v)->len--;                                     \
 	} while (0)
 
+#define vec_swap_remove(v, cnt) \
+	do {                                                    \
+		if (cnt != (v)->len - 1) {                      \
+			(v)->d[cnt] = vec_last(v);              \
+		}                                               \
+		(v)->len--;                                     \
+	} while (0)
+
 #define vec_len(v) \
 	(v)->len
 

@@ -65,12 +65,6 @@ struct pkg_job_request {
 	bool automatic;
 };
 
-enum pkg_solved_cycle_mark {
-	PKG_SOLVED_CYCLE_MARK_NONE,	/* Not yet checked */
-	PKG_SOLVED_CYCLE_MARK_DONE,	/* Finished checking */
-	PKG_SOLVED_CYCLE_MARK_PATH,	/* In the path currently being checked */
-};
-
 /*
  * The usage of the items field depends on the value of the type field:
  *
@@ -93,8 +87,6 @@ struct pkg_solved {
 	struct pkg_job_universe_item *items[2];
 	struct pkg_solved *xlink;	/* link split jobs together */
 	pkg_solved_t type;
-	enum pkg_solved_cycle_mark mark;/* scheduling cycle detection */
-	struct pkg_solved *path_next;	/* scheduling cycle detection */
 };
 typedef vec_t(struct pkg_solved *) pkg_solved_list;
 

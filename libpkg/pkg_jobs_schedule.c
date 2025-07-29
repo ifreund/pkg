@@ -28,6 +28,7 @@
 #include <assert.h>
 
 #include "pkg.h"
+#include "pkg/vec.h"
 #include "private/event.h"
 #include "private/pkg.h"
 #include "private/pkg_jobs.h"
@@ -189,31 +190,34 @@ pkg_jobs_schedule_graph_edge(struct pkg_solved *a, struct pkg_solved *b)
 }
 
 static void
-pkg_jobs_schedule_dbg_job(pkg_solved_list *jobs, struct pkg_solved *job)
+pkg_jobs_schedule_dbg_jobs(pkg_solved_list *jobs)
 {
 	if (ctx.debug_level < 4) {
 		return;
 	}
 
-	dbg(4, "job: %s %s", pkg_jobs_schedule_job_type_string(job),
-	    job->items[0]->pkg->uid);
-
 	debug_edges = true;
 	vec_foreach(*jobs, i) {
-		if (jobs->d[i] == NULL)
-			continue;
-		pkg_jobs_schedule_graph_edge(job, jobs->d[i]);
+		struct pkg_solved *job = jobs->d[i];
+
+		dbg(4, "job: %s %s", pkg_jobs_schedule_job_type_string(job),
+		    job->items[0]->pkg->uid);
+
+		vec_foreach(*jobs, j) {
+			pkg_jobs_schedule_graph_edge(job, jobs->d[j]);
+		}
 	}
 	debug_edges = false;
 }
 
 static bool
 pkg_jobs_schedule_has_incoming_edge(pkg_solved_list *nodes,
-    struct pkg_solved *node)
+    struct pkg_solved *node, struct pkg_solved *ignore)
 {
 	vec_foreach(*nodes, i) {
-		if (nodes->d[i] == NULL)
+		if (nodes->d[i] == ignore) {
 			continue;
+		}
 		if (pkg_jobs_schedule_graph_edge(nodes->d[i], node)) {
 			return (true);
 		}
@@ -256,178 +260,125 @@ pkg_jobs_schedule_cmp_available(const void *va, const void *vb)
 	}
 }
 
-/* Topological sort based on Kahn's algorithm with a tiebreaker */
+
+/* Move all job nodes with no incoming edges from unavailable to available.
+ * If node is non-NULL, only checks jobs with an incoming edge from node as
+ * an optimization. */
 static void
-pkg_jobs_schedule_topological_sort(pkg_solved_list *jobs)
+pkg_jobs_schedule_update_available(pkg_solved_list *unavailable,
+    pkg_solved_list *available, struct pkg_solved *node)
 {
-	pkg_solved_list sorted = vec_init();
-	pkg_solved_list available = vec_init();
-	size_t left = jobs->len;
-
-	/* Place all job nodes with no incoming edges in available */
-	vec_foreach(*jobs, i) {
-		if (!pkg_jobs_schedule_has_incoming_edge(jobs, jobs->d[i]) &&
-		    !pkg_jobs_schedule_has_incoming_edge(&available, jobs->d[i])) {
-			vec_push(&available, jobs->d[i]);
-			jobs->d[i] = NULL;
-			left--;
+	for (size_t i = 0; i < unavailable->len;) {
+		if ((node == NULL || pkg_jobs_schedule_graph_edge(node, unavailable->d[i])) &&
+		    !pkg_jobs_schedule_has_incoming_edge(unavailable, unavailable->d[i], NULL) &&
+		    !pkg_jobs_schedule_has_incoming_edge(available, unavailable->d[i], NULL)) {
+			vec_push(available, unavailable->d[i]);
+			vec_swap_remove(unavailable, i);
+		} else {
+			i++;
 		}
 	}
-
-	while (available.len > 0) {
-		/* Add the highest priority job from the set of available jobs
-		 * to the sorted list */
-		qsort(available.d, available.len, sizeof(available.d[0]), pkg_jobs_schedule_cmp_available);
-		struct pkg_solved *node = vec_pop(&available);
-		vec_push(&sorted, node);
-
-		/* Again, place all job nodes with no incoming edges in the set
-		 * of available jobs, ignoring any incoming edges from job nodes
-		 * already added to the sorted list */
-		vec_foreach(*jobs, i) {
-			if (jobs->d[i] == NULL)
-				continue;
-			if (pkg_jobs_schedule_graph_edge(node, jobs->d[i])) {
-				if (!pkg_jobs_schedule_has_incoming_edge(jobs, jobs->d[i]) &&
-				    !pkg_jobs_schedule_has_incoming_edge(&available, jobs->d[i])) {
-					vec_push(&available, jobs->d[i]);
-					jobs->d[i] = NULL;
-					left--;
-				}
-			}
-		}
-	}
-
-	/* The jobs list will only be non-empty at this point if there is a
-	 * cycle in the graph and all cycles must be eliminated by splitting
-	 * upgrade jobs before calling this function. */
-	assert(left == 0);
-
-	vec_free(&available);
-	free(jobs->d);
-	jobs->d = sorted.d;
-}
-
-/*
- * This is a depth-first search that keeps track of the path taken to the
- * current node in the graph. If a node on this path is encountered a
- * second time a cycle has been found.
- */
-static struct pkg_solved *
-pkg_jobs_schedule_find_cycle(pkg_solved_list *jobs,
-    struct pkg_solved **path, struct pkg_solved *node)
-{
-	/* Push node to path */
-	assert(node->mark == PKG_SOLVED_CYCLE_MARK_NONE);
-	node->mark = PKG_SOLVED_CYCLE_MARK_PATH;
-	assert(node->path_next == NULL);
-	node->path_next = *path;
-	*path = node;
-
-	vec_foreach(*jobs, i) {
-		if (pkg_jobs_schedule_graph_edge(node, jobs->d[i])) {
-			switch (jobs->d[i]->mark){
-			case PKG_SOLVED_CYCLE_MARK_NONE:;
-				struct pkg_solved *cycle =
-				    pkg_jobs_schedule_find_cycle(jobs, path, jobs->d[i]);
-				if (cycle != NULL) {
-					return (cycle);
-				}
-				break;
-			case PKG_SOLVED_CYCLE_MARK_DONE:
-				break;
-			case PKG_SOLVED_CYCLE_MARK_PATH:
-				return (jobs->d[i]); /* Found a cycle */
-			default:
-				assert(false);
-			}
-		}
-	}
-
-	/* Pop node from path */
-	assert(node->mark == PKG_SOLVED_CYCLE_MARK_PATH);
-	node->mark = PKG_SOLVED_CYCLE_MARK_DONE;
-	*path = node->path_next;
-	node->path_next = NULL;
-
-	return (NULL);
 }
 
 int pkg_jobs_schedule(struct pkg_jobs *j)
 {
-	while (true) {
-		dbg(3, "checking job scheduling graph for cycles...");
+	pkg_solved_list unavailable = j->jobs;
 
-		vec_foreach(j->jobs, i) {
-			j->jobs.d[i]->mark = PKG_SOLVED_CYCLE_MARK_NONE;
-			j->jobs.d[i]->path_next = NULL;
+	j->jobs = (pkg_solved_list)vec_init();
 
-			pkg_jobs_schedule_dbg_job(&j->jobs, j->jobs.d[i]);
+	/* First split all upgrade jobs. For the purposes of scheduling, the
+	 * install/remove parts of upgrade jobs must be treated as two
+	 * separate nodes in the graph. This avoids cycles in the graph caused
+	 * by conflicts.
+	 * During the topological sort, all upgrade jobs that are not required
+	 * to remain split (due to a cycle) will be rejoined. No upgrade jobs
+	 * can end up unnecessarily split after scheduling completes. */
+	vec_foreach(unavailable, i) {
+		struct pkg_solved *job = unavailable.d[i];
+		if (job->type == PKG_SOLVED_UPGRADE) {
+			struct pkg_solved *new = xcalloc(1, sizeof(struct pkg_solved));
+			new->type = PKG_SOLVED_UPGRADE_REMOVE;
+			new->items[0] = job->items[1];
+			new->xlink = job;
+			job->type = PKG_SOLVED_UPGRADE_INSTALL;
+			job->items[1] = NULL;
+			job->xlink = new;
+			vec_push(&unavailable, new);
 		}
-
-		/* The graph may not be connected, in which case it is necessary to
-		 * run multiple searches for cycles from different start nodes. */
-		struct pkg_solved *path = NULL;
-		struct pkg_solved *cycle = NULL;
-		vec_foreach(j->jobs, i) {
-			switch (j->jobs.d[i]->mark) {
-			case PKG_SOLVED_CYCLE_MARK_NONE:
-				cycle = pkg_jobs_schedule_find_cycle(&j->jobs, &path, j->jobs.d[i]);
-				break;
-			case PKG_SOLVED_CYCLE_MARK_DONE:
-				break;
-			case PKG_SOLVED_CYCLE_MARK_PATH:
-			default:
-				assert(false);
-			}
-			if (cycle != NULL) {
-				break;
-			}
-		}
-
-		if (cycle == NULL) {
-			dbg(3, "no job scheduling graph cycles found");
-			assert(path == NULL);
-			break;
-		}
-
-		dbg(3, "job scheduling graph cycle found");
-		assert(path != NULL);
-		assert(path != cycle);
-
-		/* Choose an arbitrary upgrade job in the cycle to split in order
-		 * to break the cycle.
-		 *
-		 * TODO: Does it truly not matter which upgrade job in the cycle we
-		 * choose to split? I'm relatively confident that splitting any upgrade job
-		 * will break the given cycle but is it possible that one of the choices
-		 * would break additional cycles as well?
-		 */
-		while (path->type != PKG_SOLVED_UPGRADE) {
-			if (path == cycle) {
-				pkg_emit_error("found job scheduling cycle without upgrade job");
-			 	return (EPKG_FATAL);
-			}
-			path = path->path_next;
-			assert(path != NULL);
-		}
-
-		/* path is now the upgrade job chosen to be split */
-		dbg(2, "splitting upgrade %s job", path->items[0]->pkg->uid);
-
-		struct pkg_solved *new = xcalloc(1, sizeof(struct pkg_solved));
-		new->type = PKG_SOLVED_UPGRADE_REMOVE;
-		new->items[0] = path->items[1];
-		new->xlink = path;
-		path->type = PKG_SOLVED_UPGRADE_INSTALL;
-		path->items[1] = NULL;
-		path->xlink = new;
-		vec_push(&j->jobs, new);
 	}
 
-	pkg_jobs_schedule_topological_sort(&j->jobs);
+	pkg_jobs_schedule_dbg_jobs(&unavailable);
+
+	/* Topological sort based on Kahn's algorithm with a special tiebreaker that
+	 * rejoins upgrade jobs which don't need to remain split. */
+	pkg_solved_list available = vec_init();
+	pkg_jobs_schedule_update_available(&unavailable, &available, NULL);
+	while (available.len > 0) {
+		/* If the last job scheduled is a split upgrade remove job, rejoin
+		 * it with the upgrade install half if possible. */
+		bool found = false;
+		if (j->jobs.len > 0 && vec_last(&j->jobs)->xlink != NULL) {
+			struct pkg_solved *job = vec_last(&j->jobs);
+			assert(job->type == PKG_SOLVED_UPGRADE_REMOVE);
+			vec_foreach(available, i) {
+				struct pkg_solved *other = available.d[i];
+				if (other->xlink == job) {
+					assert(other->type == PKG_SOLVED_UPGRADE_INSTALL);
+					assert(job->xlink == other);
+					job->type = PKG_SOLVED_UPGRADE;
+					job->items[1] = job->items[0];
+					job->items[0] = other->items[0];
+					job->xlink = NULL;
+					vec_swap_remove(&available, i);
+					pkg_jobs_schedule_update_available(
+					    &unavailable, &available, other);
+					free(other);
+					break;
+				}
+			}
+		}
+
+		vec_foreach(available, i) {
+			struct pkg_solved *job = available.d[i];
+			if (job->type != PKG_SOLVED_UPGRADE_REMOVE) {
+				continue;
+			}
+			assert(job->xlink != NULL);
+			assert(job->xlink->type == PKG_SOLVED_UPGRADE_INSTALL);
+			/* Check if selecting the upgrade remove job would make the corresponding
+			 * upgrade install half become available. */
+			if (!pkg_jobs_schedule_has_incoming_edge(&available, job->xlink, job) &&
+			    !pkg_jobs_schedule_has_incoming_edge(&unavailable, job->xlink, NULL)) {
+			    	/* Aaaa this is still not sufficient since if there are multiple upgrade
+			    	 * remove jobs to choose from and none of them make the corresponding
+			    	 * upgrade install job become available we don't know if there is a specific
+			    	 * order which would cause minimal splits. */
+			}
+
+		}
+
+		if (!found) {
+			/* Add the highest priority job from the set of available jobs
+			 * to the sorted list */
+			qsort(available.d, available.len, sizeof(available.d[0]),
+			    pkg_jobs_schedule_cmp_available);
+			struct pkg_solved *job = vec_pop(&available);
+			vec_push(&j->jobs, job);
+			pkg_jobs_schedule_update_available(&unavailable, &available, job);
+		}
+	}
+
+	if (unavailable.len > 0) {
+		pkg_emit_error("found cycle in job scheduling graph");
+		return (EPKG_FATAL);
+	}
+
+	vec_free(&unavailable);
+	vec_free(&available);
 
 	dbg(3, "finished job scheduling");
+
+	pkg_jobs_schedule_dbg_jobs(&j->jobs);
 
 	return (EPKG_OK);
 }
