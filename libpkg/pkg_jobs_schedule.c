@@ -33,9 +33,47 @@
 #include "private/pkg.h"
 #include "private/pkg_jobs.h"
 
+#include "roaring.h"
+
 #define dbg(x, ...) pkg_dbg(PKG_DBG_SCHEDULER, x, __VA_ARGS__)
 
 extern struct pkg_ctx ctx;
+
+struct pkg_job_graph {
+	roaring_bitmap_t *bitmap;
+	uint32_t node_capacity;
+};
+
+static struct pkg_job_graph
+pkg_job_graph_init(uint32_t node_capacity)
+{
+	// node_capacity must be less than sqrt(2^32) = 2^16
+	assert(node_capacity < (2 << 15));
+	return (struct pkg_job_graph) {
+		.bitmap = roaring_bitmap_create_with_capacity(node_capacity * node_capacity),
+		.node_capacity = node_capacity,
+	};
+}
+
+static void
+pkg_job_graph_deinit(struct pkg_job_graph *graph)
+{
+	roaring_bitmap_free(graph->bitmap);
+}
+
+static void
+pkg_job_graph_add_edge(struct pkg_job_graph *graph, uint32_t a, uint32_t b)
+{
+	assert(a < graph->node_capacity);
+	assert(b < graph->node_capacity);
+    roaring_bitmap_add(graph->bitmap, a * graph->node_capacity + b);
+}
+
+static bool
+pkg_job_graph_edge(struct pkg_job_graph *graph, uint32_t a, uint32_t b)
+{
+    return roaring_bitmap_contains(graph->bitmap, a * graph->node_capacity + b);
+}
 
 static const char *
 pkg_jobs_schedule_job_type_string(struct pkg_solved *job)
@@ -437,12 +475,24 @@ int pkg_jobs_schedule(struct pkg_jobs *j)
 
 	while (true) {
 		dbg(3, "checking job scheduling graph for cycles...");
+		
+		// TODO len * 2 is a hard upper limit (if every job is split) but
+		// will likely never be reached in practice. Is the compression
+		// of roaring bitmaps good enough to make this simple upper limit
+		// not meaningfully wasteful?
+		struct pkg_job_graph graph = pkg_job_graph_init(j->jobs.len * 2);
 
 		vec_foreach(j->jobs, i) {
 			j->jobs.d[i]->mark = PKG_SOLVED_CYCLE_MARK_NONE;
 			j->jobs.d[i]->path_prev = NULL;
 
 			pkg_jobs_schedule_dbg_job(&j->jobs, j->jobs.d[i]);
+
+			vec_foreach(j->jobs, other) {
+				if (pkg_jobs_schedule_graph_edge(j->jobs.d[i], j->jobs.d[other])) {
+					pkg_job_graph_add_edge(&graph, i, other);
+				}
+			}
 		}
 
 		/* The graph may not be connected, in which case it is necessary to
